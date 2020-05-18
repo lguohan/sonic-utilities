@@ -136,5 +136,11 @@
     "DEBUG_COUNTER_DROP_REASON|DEBUG_0|IP_HEADER_ERROR": {},
     "DEBUG_COUNTER_DROP_REASON|DEBUG_1|ACL_ANY": {},
     "DEBUG_COUNTER_DROP_REASON|DEBUG_2|IP_HEADER_ERROR": {},
-    "DEBUG_COUNTER_DROP_REASON|DEBUG_2|NO_L3_HEADER": {}
+    "DEBUG_COUNTER_DROP_REASON|DEBUG_2|NO_L3_HEADER": {},
+    "FEATURE|sflow": {
+		"status": "disabled"
+	},
+    "FEATURE|telemetry": {
+		"status": "enabled"
+    }
 }

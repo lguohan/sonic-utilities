@@ -35,7 +35,20 @@ SYSTEMCTL_ACTION_STOP="stop"
 SYSTEMCTL_ACTION_RESTART="restart"
 SYSTEMCTL_ACTION_RESET_FAILED="reset-failed"
 
-DEFAULT_NAMESPACE = ''
+DEFAULT_NAMESPACE = None
+asic_type = None
+
+# mock the redis for unit test purposes #
+try:
+    if os.environ["UTILITIES_UNIT_TESTING"] == "1":
+        modules_path = os.path.join(os.path.dirname(__file__), "..")
+        test_path = os.path.join(modules_path, "sonic-utilities-tests")
+        sys.path.insert(0, modules_path)
+        sys.path.insert(0, test_path)
+        import mock_tables.dbconnector
+except KeyError:
+    pass
+
 # ========================== Syslog wrappers ==========================
 
 def log_debug(msg):
@@ -102,16 +115,6 @@ class AbbreviationGroup(click.Group):
 
 
 #
-# Load asic_type for further use
-#
-
-try:
-    version_info = sonic_device_util.get_sonic_version_info()
-    asic_type = version_info['asic_type']
-except KeyError, TypeError:
-    raise click.Abort()
-
-#
 # Helper functions
 #
 
@@ -119,20 +122,19 @@ except KeyError, TypeError:
 def execute_systemctl(list_of_services, action):
     num_asic = sonic_device_util.get_num_npus()
     generated_services_list, generated_multi_instance_services = _get_sonic_generated_services(num_asic)
-    if ((generated_services_list == []) and
-        (generated_multi_instance_services == [])):
+    if len(generated_services_list) == 0 and len(generated_multi_instance_services) == 0:
         log_error("Failed to get generated services")
         return
 
     for service in list_of_services:
-        if (service + '.service' in generated_services_list):
+        if service + '.service' in generated_services_list:
             try:
                 click.echo("Executing {} of service {}...".format(action, service))
                 run_command("systemctl {} {}".format(action, service))
             except SystemExit as e:
                 log_error("Failed to execute {} of service {} with error {}".format(action, service, e))
                 raise
-        if (service + '.service' in generated_multi_instance_services):
+        if service + '.service' in generated_multi_instance_services:
             for inst in range(num_asic):
                 try:
                     click.echo("Executing {} of service {}@{}...".format(action, service, inst))
@@ -147,6 +149,9 @@ def run_command(command, display_cmd=False, ignore_error=False):
     if display_cmd == True:
         click.echo(click.style("Running command: ", fg='cyan') + click.style(command, fg='green'))
 
+    if os.environ["UTILITIES_UNIT_TESTING"] == "1":
+        return
+
     proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
     (out, err) = proc.communicate()
 
@@ -155,6 +160,20 @@ def run_command(command, display_cmd=False, ignore_error=False):
 
     if proc.returncode != 0 and not ignore_error:
         sys.exit(proc.returncode)
+
+def _get_device_type():
+    """Get device type"""
+
+    command = "{} -m -v DEVICE_METADATA.localhost.type".format(SONIC_CFGGEN_PATH)
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+    device_type, err = proc.communicate()
+    if err:
+        click.echo("Could not get the device type from minigraph, setting device type to Unknown")
+        device_type = 'Unknown'
+    else:
+        device_type = device_type.strip()
+
+    return device_type
 
 # Validate whether a given namespace name is valid in the device.
 def validate_namespace(namespace):
@@ -441,6 +460,37 @@ def _change_hostname(hostname):
         run_command('sed -i "/\s{}$/d" /etc/hosts'.format(current_hostname), display_cmd=True)
         run_command('echo "127.0.0.1 {}" >> /etc/hosts'.format(hostname), display_cmd=True)
 
+def save_config_to_db(namespace, hwsku=None, filename=None, use_minigraph=False):
+    if hwsku is not None:
+        if namespace is None:
+            command = "{} -H -k {} --write-to-db".format(SONIC_CFGGEN_PATH, hwsku)
+        else:
+            command = "{} -H -k {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, hwsku, namespace)
+    elif filename is not None:
+        if namespace is None:
+            if os.path.isfile(INIT_CFG_FILE):
+                command = "{} -j {} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE, filename)
+            else:
+                command = "{} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, filename)
+        else:
+            if os.path.isfile(INIT_CFG_FILE):
+                command = "{} -j {} -j {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE, filename, namespace)
+            else:
+                command = "{} -j {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, filename, namespace)
+    elif use_minigraph is True:
+        if namespace is None:
+            if os.path.isfile(INIT_CFG_FILE):
+                command = "{} -H -m -j {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE)
+            else:
+                command = "{} -H -m --write-to-db".format(SONIC_CFGGEN_PATH)
+        else:
+            if os.path.isfile(INIT_CFG_FILE):
+                command = "{} -H -m -j {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE, namespace)
+            else:
+                command = "{} -H -m -n {} --write-to-db".format(SONIC_CFGGEN_PATH, namespace)
+
+    run_command(command, display_cmd=True)
+
 def _clear_qos():
     QOS_TABLE_NAMES = [
             'TC_TO_PRIORITY_GROUP_MAP',
@@ -607,7 +657,7 @@ def save(filename):
     for inst in range(-1, num_cfg_file-1):
         #inst = -1, refers to the linux host where there is no namespace.
         if inst is -1:
-            namespace = None
+            namespace = DEFAULT_NAMESPACE
         else:
             namespace = "{}{}".format(NAMESPACE_PREFIX, inst)
 
@@ -615,12 +665,12 @@ def save(filename):
         if cfg_files:
             file = cfg_files[inst+1]
         else:
-            if namespace is None:
+            if namespace is DEFAULT_NAMESPACE:
                 file = DEFAULT_CONFIG_DB_FILE
             else:
                 file = "/etc/sonic/config_db{}.json".format(inst)
 
-        if namespace is None:
+        if namespace is DEFAULT_NAMESPACE:
             command = "{} -d --print-data > {}".format(SONIC_CFGGEN_PATH, file)
         else:
             command = "{} -n {} -d --print-data > {}".format(SONIC_CFGGEN_PATH, namespace, file)
@@ -680,16 +730,10 @@ def load(filename, yes):
         # if any of the config files in linux host OR namespace is not present, return
         if not os.path.isfile(file):
             click.echo("The config_db file {} doesn't exist".format(file))
-            return 
-
-        if namespace is None:
-            command = "{} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, file)
-        else:
-            command = "{} -n {} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, namespace, file)
+            return
 
         log_info("'load' executing...")
-        run_command(command, display_cmd=True)
-
+        save_config_to_db(namespace, file)
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
@@ -773,28 +817,14 @@ def reload(filename, yes, load_sysinfo):
         client = config_db.get_redis_client(config_db.CONFIG_DB)
         client.flushdb()
         if load_sysinfo:
-            if namespace is None:
-                command = "{} -H -k {} --write-to-db".format(SONIC_CFGGEN_PATH, cfg_hwsku)
-            else:
-                command = "{} -H -k {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, cfg_hwsku, namespace)
-            run_command(command, display_cmd=True)
+            save_config_to_db(namespace, hwsku=cfg_hwsku)
 
         # For the database service running in linux host we use the file user gives as input
         # or by default DEFAULT_CONFIG_DB_FILE. In the case of database service running in namespace,
         # the default config_db<namespaceID>.json format is used.
 
-        if namespace is None:
-            if os.path.isfile(INIT_CFG_FILE):
-                command = "{} -j {} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE, file)
-            else:
-                command = "{} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, file)
-        else:
-            if os.path.isfile(INIT_CFG_FILE):
-                command = "{} -j {} -j {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, INIT_CFG_FILE, file, namespace)
-            else:
-                command = "{} -j {} -n {} --write-to-db".format(SONIC_CFGGEN_PATH, file, namespace)
+        save_config_to_db(namespace, file)
 
-        run_command(command, display_cmd=True)
         client.set(config_db.INIT_INDICATOR, 1)
 
         # Migrate DB contents to latest version
@@ -844,17 +874,7 @@ def load_minigraph():
     """Reconfigure based on minigraph."""
     log_info("'load_minigraph' executing...")
 
-    # get the device type
-    command = "{} -m -v DEVICE_METADATA.localhost.type".format(SONIC_CFGGEN_PATH)
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
-    device_type, err = proc.communicate()
-    if err:
-        click.echo("Could not get the device type from minigraph, setting device type to Unknown")
-        device_type = 'Unknown'
-    else:
-        device_type = device_type.strip()
-
-    #Stop services before config push
+    # Stop services before config push
     log_info("'load_minigraph' stopping services...")
     _stop_services()
 
@@ -869,23 +889,19 @@ def load_minigraph():
     for namespace in namespace_list:
         if namespace is DEFAULT_NAMESPACE:
             config_db = ConfigDBConnector()
-            cfggen_namespace_option = " "
             ns_cmd_prefix = " "
         else:
             config_db = ConfigDBConnector(use_unix_socket_path=True, namespace=namespace)
-            cfggen_namespace_option = " -n {}".format(namespace)
             ns_cmd_prefix = "sudo ip netns exec {}".format(namespace)
         config_db.connect()
         client = config_db.get_redis_client(config_db.CONFIG_DB)
         client.flushdb()
-        if os.path.isfile('/etc/sonic/init_cfg.json'):
-            command = "{} -H -m -j /etc/sonic/init_cfg.json {} --write-to-db".format(SONIC_CFGGEN_PATH, cfggen_namespace_option)
-        else:
-            command = "{} -H -m --write-to-db {} ".format(SONIC_CFGGEN_PATH,cfggen_namespace_option)
-        run_command(command, display_cmd=True)
+        save_config_to_db(namespace, use_minigraph=True)
         client.set(config_db.INIT_INDICATOR, 1)
 
         # These commands are not run for host on multi asic platform
+        # get the device type
+        device_type = _get_device_type()
         if num_npus == 1 or namespace is not DEFAULT_NAMESPACE:
             if device_type != 'MgmtToRRouter':
                 run_command('{} pfcwd start_default'.format(ns_cmd_prefix), display_cmd=True)
@@ -1022,7 +1038,7 @@ def add(session_name, src_ip, dst_ip, dscp, ttl, gre_type, queue, policer):
 
     if queue is not None:
         session_info['queue'] = queue
-    
+
     """
     For multi-npu platforms we need to program all front asic namespaces
     """
@@ -1347,7 +1363,7 @@ def add_vlan_member(ctx, vid, interface_name, untagged):
     for entry in interface_table:
         if (interface_name == entry[0]):
             ctx.fail("{} is a L3 interface!".format(interface_name))
-            
+
     members.append(interface_name)
     vlan['members'] = members
     db.set_entry('VLAN', vlan_name, vlan)
@@ -1445,7 +1461,7 @@ def add_snmp_agent_address(ctx, agentip, port, vrf):
     #Construct SNMP_AGENT_ADDRESS_CONFIG table key in the format ip|<port>|<vrf>
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1466,7 +1482,7 @@ def del_snmp_agent_address(ctx, agentip, port, vrf):
 
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1805,7 +1821,7 @@ def speed(ctx, interface_name, interface_speed, verbose):
     run_command(command, display_cmd=verbose)
 
 def _get_all_mgmtinterface_keys():
-    """Returns list of strings containing mgmt interface keys 
+    """Returns list of strings containing mgmt interface keys
     """
     config_db = ConfigDBConnector()
     config_db.connect()
@@ -2510,9 +2526,9 @@ def priority(ctx, interface_name, priority, status):
         interface_name = interface_alias_to_name(interface_name)
         if interface_name is None:
             ctx.fail("'interface_name' is None!")
-    
+
     run_command("pfc config priority {0} {1} {2}".format(status, interface_name, priority))
-    
+
 #
 # 'platform' group ('config platform ...')
 #
@@ -2520,9 +2536,6 @@ def priority(ctx, interface_name, priority, status):
 @config.group(cls=AbbreviationGroup)
 def platform():
     """Platform-related configuration tasks"""
-
-if asic_type == 'mellanox':
-    platform.add_command(mlnx.mlnx)
 
 # 'firmware' subgroup ("config platform firmware ...")
 @platform.group(cls=AbbreviationGroup)
@@ -2716,7 +2729,7 @@ def add_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         click.echo("NTP server {} is already configured".format(ntp_ip_address))
         return
-    else: 
+    else:
         db.set_entry('NTP_SERVER', ntp_ip_address, {'NULL': 'NULL'})
         click.echo("NTP server {} added to configuration".format(ntp_ip_address))
         try:
@@ -2737,7 +2750,7 @@ def del_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         db.set_entry('NTP_SERVER', '{}'.format(ntp_ip_address), None)
         click.echo("NTP server {} removed from configuration".format(ntp_ip_address))
-    else: 
+    else:
         ctx.fail("NTP server {} is not configured.".format(ntp_ip_address))
     try:
         click.echo("Restarting ntp-config service...")
@@ -3025,7 +3038,7 @@ def delete(ctx):
 
 #
 # 'feature' command ('config feature name state')
-# 
+#
 @config.command('feature')
 @click.argument('name', metavar='<feature-name>', required=True)
 @click.argument('state', metavar='<feature-state>', required=True, type=click.Choice(["enabled", "disabled"]))
@@ -3037,7 +3050,7 @@ def feature_status(name, state):
 
     if not status_data:
         click.echo(" Feature '{}' doesn't exist".format(name))
-        return
+        sys.exit(1)
 
     config_db.mod_entry('FEATURE', name, {'status': state})
 
@@ -3078,4 +3091,16 @@ def autorestart(container_name, autorestart_status):
     config_db.mod_entry('CONTAINER_FEATURE', container_name, {'auto_restart': autorestart_status})
 
 if __name__ == '__main__':
+    #
+    # Load asic_type for further use
+    #
+    try:
+        version_info = sonic_device_util.get_sonic_version_info()
+        asic_type = version_info['asic_type']
+    except KeyError, TypeError:
+        raise click.Abort()
+
+    if asic_type == 'mellanox':
+        platform.add_command(mlnx.mlnx)
+
     config()
