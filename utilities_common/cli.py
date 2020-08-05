@@ -227,6 +227,19 @@ def is_port_vlan_member(config_db, port, vlan):
     vlan_ports_data = config_db.get_table('VLAN_MEMBER')
     for key in vlan_ports_data.keys():
         if key[0] == vlan and key[1] == port:
+
+def interface_is_in_vlan(vlan_member_table, interface_name):
+    """ Check if an interface  is in a vlan """
+    for _,intf in vlan_member_table.keys():
+        if intf == interface_name:
+            return True
+
+    return False
+
+def interface_is_in_portchannel(portchannel_member_table, interface_name):
+    """ Check if an interface is part of portchannel """
+    for _,intf in portchannel_member_table.keys():
+        if intf == interface_name:
             return True
 
     return False
@@ -256,6 +269,16 @@ def is_port_mirror_dst_port(config_db, port):
     mirror_table = config_db.get_table('MIRROR_SESSION')
     for _,v in mirror_table.items():
         if 'dst_port' in v and v['dst_port'] == port:
+            return True
+
+    return False
+
+def interface_has_mirror_config(mirror_table, interface_name):
+    """ Check if port is already configured with mirror config """
+    for _,v in mirror_table.items():
+        if 'src_port' in v and v['src_port'] == interface_name:
+            return True
+        if 'dst_port' in v and v['dst_port'] == interface_name:
             return True
 
     return False

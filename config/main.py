@@ -25,6 +25,7 @@ import aaa
 import mlnx
 import nat
 import feature
+import portchannel
 import vlan
 from config_mgmt import ConfigMgmtDPB
 
@@ -727,33 +728,6 @@ def _restart_services(config_db):
 
     execute_systemctl(services_to_restart, SYSTEMCTL_ACTION_RESTART)
 
-
-def  interface_is_in_vlan(vlan_member_table, interface_name):
-    """ Check if an interface  is in a vlan """
-    for _,intf in vlan_member_table.keys():
-        if intf == interface_name:
-            return True
-
-    return False
-
-def  interface_is_in_portchannel(portchannel_member_table, interface_name):
-    """ Check if an interface is part of portchannel """
-    for _,intf in portchannel_member_table.keys():
-        if intf == interface_name:
-            return True
-
-    return False
-
-def interface_has_mirror_config(mirror_table, interface_name):
-    """ Check if port is already configured with mirror config """
-    for _,v in mirror_table.items():
-        if 'src_port' in v and v['src_port'] == interface_name:
-            return True
-        if 'dst_port' in v and v['dst_port'] == interface_name:
-            return True
-
-    return False
-
 def validate_mirror_session_config(config_db, session_name, dst_port, src_port, direction):
     """ Check if SPAN mirror-session config is valid """
     if len(config_db.get_entry('MIRROR_SESSION', session_name)) != 0:
@@ -838,6 +812,7 @@ config.add_command(aaa.tacacs)
 config.add_command(feature.feature)
 # === Add NAT Configuration ==========
 config.add_command(nat.nat)
+config.add_command(portchannel.portchannel)
 config.add_command(vlan.vlan)
 
 @config.command()
@@ -1196,68 +1171,6 @@ def hostname(new_hostname):
         click.echo("Restarting hostname-config  service failed with error {}".format(e))
         raise
     click.echo("Please note loaded setting will be lost after system reboot. To preserve setting, run `config save`.")
-
-#
-# 'portchannel' group ('config portchannel ...')
-#
-@config.group(cls=clicommon.AbbreviationGroup)
-@click.pass_context
-def portchannel(ctx):
-    config_db = ConfigDBConnector()
-    config_db.connect()
-    ctx.obj = {'db': config_db}
-
-@portchannel.command('add')
-@click.argument('portchannel_name', metavar='<portchannel_name>', required=True)
-@click.option('--min-links', default=0, type=int)
-@click.option('--fallback', default='false')
-@click.pass_context
-def add_portchannel(ctx, portchannel_name, min_links, fallback):
-    """Add port channel"""
-    db = ctx.obj['db']
-    fvs = {'admin_status': 'up',
-           'mtu': '9100'}
-    if min_links != 0:
-        fvs['min_links'] = str(min_links)
-    if fallback != 'false':
-        fvs['fallback'] = 'true'
-    db.set_entry('PORTCHANNEL', portchannel_name, fvs)
-
-@portchannel.command('del')
-@click.argument('portchannel_name', metavar='<portchannel_name>', required=True)
-@click.pass_context
-def remove_portchannel(ctx, portchannel_name):
-    """Remove port channel"""
-    db = ctx.obj['db']
-    db.set_entry('PORTCHANNEL', portchannel_name, None)
-
-@portchannel.group(cls=clicommon.AbbreviationGroup, name='member')
-@click.pass_context
-def portchannel_member(ctx):
-    pass
-
-@portchannel_member.command('add')
-@click.argument('portchannel_name', metavar='<portchannel_name>', required=True)
-@click.argument('port_name', metavar='<port_name>', required=True)
-@click.pass_context
-def add_portchannel_member(ctx, portchannel_name, port_name):
-    """Add member to port channel"""
-    db = ctx.obj['db']
-    if clicommon.is_port_mirror_dst_port(db, port_name):
-        ctx.fail("{} is configured as mirror destination port".format(port_name))
-    db.set_entry('PORTCHANNEL_MEMBER', (portchannel_name, port_name),
-            {'NULL': 'NULL'})
-
-@portchannel_member.command('del')
-@click.argument('portchannel_name', metavar='<portchannel_name>', required=True)
-@click.argument('port_name', metavar='<port_name>', required=True)
-@click.pass_context
-def del_portchannel_member(ctx, portchannel_name, port_name):
-    """Remove member from portchannel"""
-    db = ctx.obj['db']
-    db.set_entry('PORTCHANNEL_MEMBER', (portchannel_name, port_name), None)
-    db.set_entry('PORTCHANNEL_MEMBER', portchannel_name + '|' + port_name, None)
-
 
 #
 # 'mirror_session' group ('config mirror_session ...')
