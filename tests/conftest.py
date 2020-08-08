@@ -48,17 +48,10 @@ generated_services_list = [
     'snmp.timer',
     'telemetry.timer']
 
-
-def _dummy_run_command(command, display_cmd=False, return_cmd=False):
-    if display_cmd == True:
-        click.echo(click.style("Running command: ", fg='cyan') + click.style(command, fg='green'))
-
 @pytest.fixture
 def get_cmd_module():
     import config.main as config
     import show.main as show
-
-    config.run_command = _dummy_run_command
 
     return (config, show)
 
