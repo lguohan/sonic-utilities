@@ -16,7 +16,6 @@ def brief(db, verbose):
     """Show all bridge information"""
     header = ['VLAN ID', 'IP Address', 'Ports', 'Port Tagging', 'DHCP Helper Address']
     body = []
-    vlan_keys = []
 
     # Fetching data from config db for VLAN, VLAN_INTERFACE and VLAN_MEMBER
     vlan_dhcp_helper_data = db.cfgdb.get_table('VLAN')
